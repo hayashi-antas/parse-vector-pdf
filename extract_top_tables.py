@@ -8,6 +8,7 @@ post-extraction validation checks.
 from __future__ import annotations
 
 import argparse
+import csv
 import re
 import zipfile
 from collections import defaultdict
@@ -467,6 +468,52 @@ def write_xlsx(path: Path, rows: Sequence[Sequence[str]]) -> None:
         zf.writestr("xl/worksheets/sheet1.xml", sheet_xml)
 
 
+def write_csv(path: Path, rows: Sequence[Sequence[str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerows(rows)
+
+
+def build_single_header_csv_rows(rows: Sequence[Sequence[str]]) -> List[List[str]]:
+    if len(rows) < 3:
+        raise ValueError("Need at least 2 header rows and 1 data row for flat CSV.")
+
+    h1 = list(rows[0][:CELL_COUNT])
+    h2 = list(rows[1][:CELL_COUNT])
+    data_rows = [list(r[:CELL_COUNT]) for r in rows[2:]]
+
+    # Forward-fill merged parent headers (e.g., 仕様, 動力 (50Hz), 設置場所).
+    parent = []
+    current = ""
+    for cell in h1:
+        if cell:
+            current = cell
+        parent.append(current)
+
+    flat_header: List[str] = []
+    for i in range(CELL_COUNT):
+        p = parent[i].strip()
+        c = h2[i].strip()
+        if p and c:
+            flat_header.append(f"{p}_{c}")
+        else:
+            flat_header.append(p or c)
+
+    return [flat_header] + data_rows
+
+
+def build_four_column_rows(rows: Sequence[Sequence[str]]) -> List[List[str]]:
+    if len(rows) < 3:
+        raise ValueError("Need at least 2 header rows and 1 data row for 4-column CSV.")
+    data_rows = [list(r[:CELL_COUNT]) for r in rows[2:]]
+    header = ["機器番号", "名称", "動力 (50Hz)_消費電力 (KW)", "台数"]
+    out = [header]
+    for r in data_rows:
+        out.append([r[0], r[1], r[9], r[15]])
+    return out
+
+
 def read_xlsx_rows(path: Path, max_row: int, max_col: int) -> List[List[str]]:
     ns = {
         "a": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
@@ -578,14 +625,43 @@ def extract_pdf_to_rows(pdf_path: Path) -> Tuple[List[List[str]], int, List[List
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Extract two top-side PDF tables into one merged XLSX."
+        description="Extract two top-side PDF tables into merged XLSX/CSV."
     )
-    parser.add_argument("pdf", type=Path, help="Input PDF path")
+    parser.add_argument(
+        "pdf",
+        type=Path,
+        nargs="?",
+        default=Path("./data/機器表1.pdf"),
+        help="Input PDF path (default: ./data/機器表1.pdf)",
+    )
     parser.add_argument(
         "--output-xlsx",
         type=Path,
-        default=Path("./extracted_tables/ventilation_equipment_merged.xlsx"),
-        help="Output XLSX path (default: ./extracted_tables/ventilation_equipment_merged.xlsx)",
+        default=Path("./data/ventilation_equipment_merged.xlsx"),
+        help="Output XLSX path (default: ./data/ventilation_equipment_merged.xlsx)",
+    )
+    parser.add_argument(
+        "--output-csv",
+        type=Path,
+        default=Path("./data/ventilation_equipment_merged.csv"),
+        help="Output CSV path with original 2-row header (default: ./data/ventilation_equipment_merged.csv)",
+    )
+    parser.add_argument(
+        "--output-csv-flat",
+        type=Path,
+        default=Path("./data/ventilation_equipment_merged_flat.csv"),
+        help="Output CSV path with 1-row readable header (default: ./data/ventilation_equipment_merged_flat.csv)",
+    )
+    parser.add_argument(
+        "--four-column",
+        action="store_true",
+        help="Also output a 4-column CSV (機器番号, 名称, 動力(50Hz)_消費電力, 台数).",
+    )
+    parser.add_argument(
+        "--output-csv-four",
+        type=Path,
+        default=None,
+        help="Output path for 4-column CSV. If omitted with --four-column, defaults to ./data/ventilation_equipment_four_columns.csv",
     )
     parser.add_argument(
         "--validate-against-xlsx",
@@ -604,8 +680,25 @@ def main() -> None:
 
     rows, note_rows, headers = extract_pdf_to_rows(args.pdf)
     write_xlsx(args.output_xlsx, rows)
+    if args.output_csv:
+        write_csv(args.output_csv, rows)
+    if args.output_csv_flat:
+        flat_rows = build_single_header_csv_rows(rows)
+        write_csv(args.output_csv_flat, flat_rows)
+    output_csv_four = args.output_csv_four
+    if args.four_column and output_csv_four is None:
+        output_csv_four = Path("./data/ventilation_equipment_four_columns.csv")
+    if output_csv_four:
+        four_rows = build_four_column_rows(rows)
+        write_csv(output_csv_four, four_rows)
 
     print(f"Output: {args.output_xlsx.resolve()}")
+    if args.output_csv:
+        print(f"Output CSV: {args.output_csv.resolve()}")
+    if args.output_csv_flat:
+        print(f"Output CSV (flat header): {args.output_csv_flat.resolve()}")
+    if output_csv_four:
+        print(f"Output CSV (4 columns): {output_csv_four.resolve()}")
     print(f"Rows written: {len(rows)} (header=2, data={len(rows)-2})")
     print(f"Note rows captured in data region: {note_rows}")
 
